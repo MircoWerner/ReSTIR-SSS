@@ -1,0 +1,158 @@
+#version 460
+#extension GL_GOOGLE_include_directive: enable
+#extension GL_EXT_nonuniform_qualifier: enable
+#extension GL_EXT_scalar_block_layout: enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64: require
+#extension GL_EXT_buffer_reference2: require
+#extension GL_EXT_ray_query : require
+
+#include "../../defines.glsl"
+
+#include "../../utility/constants.glsl"
+#include "../../utility/random.glsl"
+#include "../../raystructs.glsl"
+#include "../../raycommon.glsl"
+
+layout (local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+
+layout (push_constant, std430) uniform PushConstants {
+    int g_pixels_x;
+    int g_pixels_y;
+
+    float g_ray_origin_x;
+    float g_ray_origin_y;
+    float g_ray_origin_z;
+    float g_ray_left_bottom_x;
+    float g_ray_left_bottom_y;
+    float g_ray_left_bottom_z;
+    float g_ray_left_top_x;
+    float g_ray_left_top_y;
+    float g_ray_left_top_z;
+    float g_ray_right_bottom_x;
+    float g_ray_right_bottom_y;
+    float g_ray_right_bottom_z;
+    float g_ray_right_top_x;
+    float g_ray_right_top_y;
+    float g_ray_right_top_z;
+
+    uint g_frame;
+
+    uint g_rng_init;
+    uint g_rng_init_offset;
+};
+
+layout (set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
+layout (set = 0, binding = 1, rgba32f) uniform image2D framebuffer;
+layout (set = 0, binding = 2, rgba32f) uniform image2D accumulationBuffer;
+
+layout (std430, set = 0, binding = 3) uniform options_pass_surface {
+    uint g_num_lights;
+
+    uint g_normal_mapping;
+    uint g_sss;
+};
+
+// SCENE
+layout (set = 0, binding = 10, scalar) readonly buffer buffer_object_descriptor { ObjectDescriptor g_objectDescriptors[]; };
+layout (set = 0, binding = 11, scalar) readonly buffer buffer_material { Material g_materials[]; };
+layout (set = 0, binding = 12, scalar) readonly buffer buffer_light { Light g_lights[]; };
+
+layout (buffer_reference, scalar) readonly buffer Indices { ivec3 i[]; };
+layout (buffer_reference, scalar) readonly buffer Vertices { Vertex v[]; };
+
+layout (set = 0, binding = 20) uniform sampler2D textures[NUM_TEXTURES];
+layout (set = 0, binding = 21) uniform sampler2D textureEnvironment;
+
+// G-BUFFER
+//layout (set = 0, binding = 30, scalar) readonly buffer buffer_g_buffers { GBuffer g_gBuffers[]; };
+layout (set = 0, binding = 30, rgba32f) readonly uniform image2D g_gBuffers;
+
+#include "../restirsss/restirsss_pixel_info.glsl"
+
+#include "../gbuffer.glsl"
+#include "../../arealight.glsl"
+#include "../../visibility/visibility.glsl"
+#include "../../bxdf/disney.glsl"
+
+vec3 generateSampleBSDFWithLightSourceSampling(inout uint rngState, in ReSTIRPixelInfo pixelInfo) {
+    // sample light candidate
+    int lightObjectDescriptor;
+    int lightTriangleId;
+    vec2 lightBarycentrics;
+    vec3 lightPosition;
+    vec3 lightNormalUnaligned;
+    vec3 lightEmission;
+    float lightPDFVAM;
+    arealight_sample_vam(nextUInt(rngState, g_num_lights - 1), nextFloat(rngState), nextFloat(rngState), lightObjectDescriptor, lightTriangleId, lightBarycentrics, lightPosition, lightNormalUnaligned, lightEmission, lightPDFVAM);
+
+    const vec3 lightToSurface = pixelInfo.position - lightPosition;
+    const vec3 lightToSurfaceNormalized = normalize(lightToSurface);
+    const vec3 lightNormal = dot(lightNormalUnaligned, lightToSurfaceNormalized) >= 0.0 ? lightNormalUnaligned : -lightNormalUnaligned;// align normal in correct direction
+    const float cosAtLight = max(0, dot(lightNormal, lightToSurfaceNormalized));
+    const float geometryTermSolidAngle = cosAtLight / dot(lightToSurface, lightToSurface);
+    const float lightPDF = lightPDFVAM / geometryTermSolidAngle;
+    if (lightPDF <= 0.0) {
+        return vec3(0);
+    }
+
+    if (!visibility_shadowRay(pixelInfo.position, pixelInfo.geometricNormal, -lightToSurfaceNormalized, length(lightToSurface), lightObjectDescriptor, lightTriangleId)) {
+        return vec3(0);
+    }
+
+    // evaluate bsdf
+    const BSDFVertex vertex = BSDFVertex(pixelInfo.geometricNormal);
+    const BSDFFrame frame = coordinateSystem(pixelInfo.normal);
+    const vec3 bsdf = bsdf_disney_evaluate(vertex, frame, pixelInfo.material, pixelInfo.v, -lightToSurfaceNormalized);
+
+    const float cosAtSurface = max(0, dot(pixelInfo.normal, -lightToSurfaceNormalized));
+
+    return bsdf * cosAtSurface * lightEmission / lightPDF;
+}
+
+vec3 pathtraceSingle(inout uint rngState, in const ReSTIRPixelInfo pixelInfo) {
+    if (g_num_lights <= 0) {
+        return vec3(0);
+    }
+
+    // bsdf
+    return generateSampleBSDFWithLightSourceSampling(rngState, pixelInfo);
+}
+
+void shade(inout uint rngState, in const ivec2 pixel) {
+    const int pixelIndex = pixel.y * g_pixels_x + pixel.x;
+
+    // load g-buffer
+    //    const GBuffer gBuffer = g_gBuffers[pixelIndex];
+    const vec4 gBufferRaw = imageLoad(g_gBuffers, pixel);
+    const GBuffer gBuffer = GBuffer(uint(gBufferRaw[0]), uint(gBufferRaw[1]), gBufferRaw[2], gBufferRaw[3]);
+
+    // pixel info
+    ReSTIRPixelInfo pixelInfo;
+    if (!pixelInfoFromGBuffer(vec3(g_ray_origin_x, g_ray_origin_y, g_ray_origin_z), gBuffer, pixelInfo)) {
+        return;
+    }
+
+    const bool pathSSS = restirsss_pixel_info_isSSS(pixelInfo);
+    if (pathSSS) {
+        return;
+    }
+
+    const vec3 color = pathtraceSingle(rngState, pixelInfo);
+
+    // accumulate and write framebuffer
+    const vec3 newColor = mix(imageLoad(accumulationBuffer, pixel).rgb, color, 1.0 / float(g_frame + 1));
+    imageStore(accumulationBuffer, pixel, vec4(newColor, 1.0));
+    imageStore(framebuffer, pixel, vec4(newColor, 1.0));
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(g_pixels_x, g_pixels_y)))) {
+        return;
+    }
+
+    // load rng
+    uint rngState = (g_rng_init + 1) * g_pixels_x * (pixel.y + 1) + pixel.x + g_rng_init_offset;// add offset to avoid same seed as other passes (otherwise, visible artifacts possible)
+
+    shade(rngState, pixel);
+}

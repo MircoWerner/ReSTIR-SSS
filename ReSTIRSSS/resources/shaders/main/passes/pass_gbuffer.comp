@@ -1,0 +1,199 @@
+#version 460
+#extension GL_GOOGLE_include_directive: enable
+#extension GL_EXT_nonuniform_qualifier: enable
+#extension GL_EXT_scalar_block_layout: enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64: require
+#extension GL_EXT_buffer_reference2: require
+#extension GL_EXT_ray_query : require
+
+#include "../../defines.glsl"
+
+#include "../../utility/constants.glsl"
+#include "../../utility/random.glsl"
+#include "../../raystructs.glsl"
+#include "../../raycommon.glsl"
+
+layout (local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+
+layout (push_constant, std430) uniform PushConstants {
+    int g_pixels_x;
+    int g_pixels_y;
+
+    float g_ray_origin_x;
+    float g_ray_origin_y;
+    float g_ray_origin_z;
+    float g_ray_left_bottom_x;
+    float g_ray_left_bottom_y;
+    float g_ray_left_bottom_z;
+    float g_ray_left_top_x;
+    float g_ray_left_top_y;
+    float g_ray_left_top_z;
+    float g_ray_right_bottom_x;
+    float g_ray_right_bottom_y;
+    float g_ray_right_bottom_z;
+    float g_ray_right_top_x;
+    float g_ray_right_top_y;
+    float g_ray_right_top_z;
+
+    uint g_frame;
+
+    uint g_rng_init;
+    uint g_rng_init_offset;
+};
+
+layout (set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
+layout (set = 0, binding = 1, rgba32f) uniform image2D framebuffer;
+layout (set = 0, binding = 2, rgba32f) uniform image2D accumulationBuffer;
+
+layout (std430, set = 0, binding = 3) uniform options_restirsss_pass_gbuffer {
+    mat4 g_view_to_clip_space;
+    mat4 g_world_to_view_space;
+
+    uint g_num_lights;
+
+    uint g_environment_map;
+    vec2 g_environment_map_rotation;
+    vec3 g_sky_color;
+
+    uint g_normal_mapping;
+    uint g_sss;
+
+    uint g_non_sss_objects;
+
+    mat4 g_vp;// view projection of this frame
+    mat4 g_vp_prev;// view projection of previous frame
+};
+
+// SCENE
+layout (set = 0, binding = 10, scalar) readonly buffer buffer_object_descriptor { ObjectDescriptor g_objectDescriptors[]; };
+layout (set = 0, binding = 11, scalar) readonly buffer buffer_material { Material g_materials[]; };
+layout (set = 0, binding = 12, scalar) readonly buffer buffer_light { Light g_lights[]; };
+
+layout (buffer_reference, scalar) readonly buffer Indices { ivec3 i[]; };
+layout (buffer_reference, scalar) readonly buffer Vertices { Vertex v[]; };
+
+layout (set = 0, binding = 20) uniform sampler2D textures[NUM_TEXTURES];
+layout (set = 0, binding = 21) uniform sampler2D textureEnvironment;
+
+// G-BUFFER
+//layout (set = 0, binding = 30, scalar) writeonly buffer buffer_g_buffers { GBuffer g_gBuffers[]; };
+layout (set = 0, binding = 30, rgba32f) writeonly uniform image2D g_gBuffers;
+layout (set = 0, binding = 31, rgba32f) writeonly uniform image2D image_g_buffer_albedo;
+layout (set = 0, binding = 32, rgba32f) writeonly uniform image2D image_g_buffer_normal;
+
+#include "../../trace/trace_rayquery.glsl"
+#include "../../arealight.glsl"
+#include "../../material.glsl"
+#include "../../environment.glsl"
+#include "../../bxdf/disney.glsl"
+#include "../restirsss/restirsss_defines.glsl"
+
+void primaryHit(inout uint rngState, in const vec3 inOrigin, in const vec3 inDirection, in const ivec2 launchSize, in const ivec2 pixel, out GBuffer gBuffer, out vec3 gBufferAlbedo, out vec3 gBufferNormal) {
+    HitPayload payload;
+    vec3 positionWorld;// interpolated position
+    vec3 geometricNormalWorld;
+    vec3 normalWorld;
+    vec2 uv;
+    Material material;
+
+    // === VISIBLE POINT ===
+    {
+        // trace ray
+        if (!trace(inOrigin, inDirection, 0, 10000.0, payload)) {
+            // hit nothing (sky)
+            gBuffer.objectDescriptorId = GBUFFER_NULL;
+            gBuffer.triangleId = GBUFFER_NULL;
+            gBuffer.barycentricsY = 0;
+            gBuffer.barycentricsZ = 0;
+            gBufferAlbedo = vec3(0);
+            gBufferNormal = vec3(0);
+            const vec3 environment = environment_evaluate(inDirection);
+            // accumulate and write framebuffer
+            const vec3 newColor = mix(imageLoad(accumulationBuffer, pixel).rgb, environment, 1.0 / float(g_frame + 1));
+            imageStore(accumulationBuffer, pixel, vec4(newColor, 1.0));
+            imageStore(framebuffer, pixel, vec4(newColor, 1.0));
+            return;
+        }
+
+        // query intersection info
+        intersectionInfo(payload, positionWorld, geometricNormalWorld, normalWorld, uv, material);
+
+        // check if surface is emissive
+        if (material_isLightSource(material)) {
+            gBuffer.objectDescriptorId = GBUFFER_NULL;
+            gBuffer.triangleId = GBUFFER_NULL;
+            gBuffer.barycentricsY = 0;
+            gBuffer.barycentricsZ = 0;
+            gBufferAlbedo = material_getAlbedo(material, uv);
+            gBufferNormal = normalWorld;
+            const vec3 emission = material.emission;
+            // accumulate and write framebuffer
+            const vec3 newColor = mix(imageLoad(accumulationBuffer, pixel).rgb, emission, 1.0 / float(g_frame + 1));
+            imageStore(accumulationBuffer, pixel, vec4(newColor, 1.0));
+            imageStore(framebuffer, pixel, vec4(newColor, 1.0));
+            return;
+        }
+
+        gBuffer.objectDescriptorId = payload.objectDescriptorId;
+        gBuffer.triangleId = payload.triangleId;
+        gBuffer.barycentricsY = payload.barycentrics.x;
+        gBuffer.barycentricsZ = payload.barycentrics.y;
+        gBufferAlbedo = material_getAlbedo(material, uv);
+        gBufferNormal = normalWorld;
+    }
+
+//    #ifdef RESTIRSSS_PROBINVERSETEST_L3PATH
+    if (g_non_sss_objects == 0) {
+        float pdfScatteringType;
+        const uint scatteringType = disney_sampleScatteringType(rngState, g_sss != 0, 0, material.subsurface, pdfScatteringType);
+
+        if ((scatteringType & SCATTERING_TYPE_BSSRDF) <= 0) {
+            // currently only supporting translucent objects as first hit
+            gBuffer.objectDescriptorId = GBUFFER_NULL;
+            gBuffer.triangleId = GBUFFER_NULL;
+            // accumulate and write framebuffer
+            const vec3 newColor = mix(imageLoad(accumulationBuffer, pixel).rgb, vec3(1, 1, 1), 1.0 / float(g_frame + 1));
+            imageStore(accumulationBuffer, pixel, vec4(newColor, 1.0));
+            imageStore(framebuffer, pixel, vec4(newColor, 1.0));
+            return;
+        }
+    }
+//    #endif
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(g_pixels_x, g_pixels_y)))) {
+        return;
+    }
+
+    // load direction
+    vec3 direction;
+    {
+        uint pixelState = (g_frame + 1) * g_pixels_x * (pixel.y + 1) + pixel.x;
+        float offsetX = nextFloat(pixelState) - 0.5;// [-0.5,0.5]
+        float offsetY = nextFloat(pixelState) - 0.5;// [-0.5,0.5]
+
+        vec2 pixel_uv = (vec2(pixel.xy) + vec2(0.5) + vec2(offsetX, offsetY)) / vec2(g_pixels_x, g_pixels_y);
+        direction = normalize(mix(
+        mix(vec3(g_ray_left_bottom_x, g_ray_left_bottom_y, g_ray_left_bottom_z), vec3(g_ray_left_top_x, g_ray_left_top_y, g_ray_left_top_z), pixel_uv.y),
+        mix(vec3(g_ray_right_bottom_x, g_ray_right_bottom_y, g_ray_right_bottom_z), vec3(g_ray_right_top_x, g_ray_right_top_y, g_ray_right_top_z), pixel_uv.y),
+        pixel_uv.x));
+    }
+
+    // load rng
+    uint rngState = (g_rng_init + 1) * g_pixels_x * (pixel.y + 1) + pixel.x + g_rng_init_offset;// add offset to avoid same seed as other passes (otherwise, visible artifacts possible)
+
+    // primary hit
+    GBuffer gBuffer;
+    vec3 gBufferAlbedo;
+    vec3 gBufferNormal;
+    primaryHit(rngState, vec3(g_ray_origin_x, g_ray_origin_y, g_ray_origin_z), direction, ivec2(g_pixels_x, g_pixels_y), pixel, gBuffer, gBufferAlbedo, gBufferNormal);
+
+    // write g-buffer
+    const int pixelIndex = pixel.y * g_pixels_x + pixel.x;
+    //    g_gBuffers[pixelIndex] = gBuffer;
+    imageStore(g_gBuffers, pixel, vec4(gBuffer.objectDescriptorId, gBuffer.triangleId, gBuffer.barycentricsY, gBuffer.barycentricsZ));
+    imageStore(image_g_buffer_albedo, pixel, vec4(gBufferAlbedo, 1.0));
+    imageStore(image_g_buffer_normal, pixel, vec4(gBufferNormal, 1.0));
+}

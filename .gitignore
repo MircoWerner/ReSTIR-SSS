@@ -1,0 +1,23 @@
+# JetBrains IDE
+.idea/*
+**/.idea/*
+*.iws
+*.iml
+*.eml
+
+/build/*
+**/cmake-build-*/*
+
+# Visual Studio
+/out/
+**/out/
+CmakeSettings.json
+/.vs/
+**/.vs/
+
+# Shaders
+*.spv
+
+# assets
+**/resources/assets/*
+**/resources/environment/*

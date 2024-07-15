@@ -1,0 +1,265 @@
+#version 460
+#extension GL_GOOGLE_include_directive: enable
+#extension GL_EXT_nonuniform_qualifier: enable
+#extension GL_EXT_scalar_block_layout: enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64: require
+#extension GL_EXT_buffer_reference2: require
+#extension GL_EXT_ray_query : require
+
+#include "../../defines.glsl"
+#include "../restirsss/restirsss_defines.glsl"
+
+#include "../../utility/constants.glsl"
+#include "../../utility/random.glsl"
+#include "../../raystructs.glsl"
+#include "../../raycommon.glsl"
+
+layout (local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+
+layout (push_constant, std430) uniform PushConstants {
+    int g_pixels_x;
+    int g_pixels_y;
+
+    float g_ray_origin_x;
+    float g_ray_origin_y;
+    float g_ray_origin_z;
+    float g_ray_left_bottom_x;
+    float g_ray_left_bottom_y;
+    float g_ray_left_bottom_z;
+    float g_ray_left_top_x;
+    float g_ray_left_top_y;
+    float g_ray_left_top_z;
+    float g_ray_right_bottom_x;
+    float g_ray_right_bottom_y;
+    float g_ray_right_bottom_z;
+    float g_ray_right_top_x;
+    float g_ray_right_top_y;
+    float g_ray_right_top_z;
+
+    uint g_frame;
+
+    uint g_rng_init;
+    uint g_rng_init_offset;
+};
+
+layout (set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+layout (std430, set = 0, binding = 3) uniform options_restirsss_pass_temporal_reuse {
+    vec3 g_ray_origin_prev;
+    vec3 g_ray_left_bottom_prev;
+    vec3 g_ray_left_top_prev;
+    vec3 g_ray_right_bottom_prev;
+    vec3 g_ray_right_top_prev;
+
+    mat4 g_view_to_clip_space;
+    mat4 g_world_to_view_space;
+
+    uint g_num_lights;
+
+    uint g_environment_map;
+    vec2 g_environment_map_rotation;
+    vec3 g_sky_color;
+
+    uint g_normal_mapping;
+    uint g_sss;
+
+    uint g_restir_candidate_samples;
+//    uint g_restir_visibility;
+    uint g_restir_shift;
+    uint g_restir_non_sss_surfaces;
+
+    mat4 g_vp;// view projection of this frame
+    mat4 g_vp_prev;// view projection of previous frame
+};
+
+// SCENE
+layout (set = 0, binding = 10, scalar) readonly buffer buffer_object_descriptor { ObjectDescriptor g_objectDescriptors[]; };
+layout (set = 0, binding = 11, scalar) readonly buffer buffer_material { Material g_materials[]; };
+layout (set = 0, binding = 12, scalar) readonly buffer buffer_light { Light g_lights[]; };
+
+layout (buffer_reference, scalar) readonly buffer Indices { ivec3 i[]; };
+layout (buffer_reference, scalar) readonly buffer Vertices { Vertex v[]; };
+
+layout (set = 0, binding = 20) uniform sampler2D textures[NUM_TEXTURES];
+layout (set = 0, binding = 21) uniform sampler2D textureEnvironment;
+
+// G-BUFFER
+//layout (set = 0, binding = 30, scalar) readonly buffer buffer_g_buffers { GBuffer g_gBuffers[]; };
+layout (set = 0, binding = 30, rgba32f) readonly uniform image2D g_gBuffers;
+//layout (set = 0, binding = 31, scalar) readonly buffer buffer_g_buffers_previous_frame { GBuffer g_gBuffersPreviousFrame[]; };
+layout (set = 0, binding = 31, rgba32f) readonly uniform image2D g_gBuffersPreviousFrame;
+
+#ifdef RESTIRSSS_WRITE_DEBUG_IMAGES
+layout (set = 0, binding = 50, rgba32f) uniform image2D g_ReSTIRDebug;
+shared uint g_debug_valueR[gl_WorkGroupSize.x * gl_WorkGroupSize.y];
+shared uint g_debug_valueG[gl_WorkGroupSize.x * gl_WorkGroupSize.y];
+shared uint g_debug_valueB[gl_WorkGroupSize.x * gl_WorkGroupSize.y];
+shared uint g_debug_valueA[gl_WorkGroupSize.x * gl_WorkGroupSize.y];
+#define LOCAL_LINEAR_INDEX gl_LocalInvocationID.y * gl_WorkGroupSize.x + gl_LocalInvocationID.x
+#endif
+
+// ReSTIR
+#include "../restirsss/restirsss_pixel_info.glsl"
+#include "../restirsss/restirsss_reservoir.glsl"
+#ifdef RESTIRSSS_PROBINVERSETEST_L3PATH
+#include "../restirsss/probinversetest/restirsss_target_function_test.glsl"
+#else
+#include "../restirsss/restirsss_target_function.glsl"
+#endif
+//layout (set = 0, binding = 40, scalar) readonly buffer buffer_ReSTIR_reservoirs_previous_frame { ReSTIRSSSReservoirCompressed g_ReSTIRReservoirsPreviousFrame[]; };
+layout (set = 0, binding = 40, rgba32f) readonly uniform image2D g_ReSTIRReservoirsPreviousFrame0;
+layout (set = 0, binding = 41, rgba32f) readonly uniform image2D g_ReSTIRReservoirsPreviousFrame1;
+layout (set = 0, binding = 42, rgba32f) readonly uniform image2D g_ReSTIRReservoirsPreviousFrame2;
+layout (set = 0, binding = 43, rgba32f) readonly uniform image2D g_ReSTIRReservoirsPreviousFrame3;
+//layout (set = 0, binding = 41, scalar) buffer buffer_ReSTIR_reservoirs_this_frame { ReSTIRSSSReservoirCompressed g_ReSTIRReservoirsThisFrame[]; };
+layout (set = 0, binding = 45, rgba32f) uniform image2D g_ReSTIRReservoirsThisFrame0;
+layout (set = 0, binding = 46, rgba32f) uniform image2D g_ReSTIRReservoirsThisFrame1;
+layout (set = 0, binding = 47, rgba32f) uniform image2D g_ReSTIRReservoirsThisFrame2;
+layout (set = 0, binding = 48, rgba32f) uniform image2D g_ReSTIRReservoirsThisFrame3;
+
+#include "../restirsss/restirsss_mis.glsl"
+
+#include "../gbuffer.glsl"
+
+ivec2 reprojectPixel(in const ivec2 size, in const vec3 positionWorld) {
+    const vec4 positionClipPrev = g_vp_prev * vec4(positionWorld, 1.0);
+    const vec2 positionScreenPrev = positionClipPrev.xy / positionClipPrev.w * 0.5 + 0.5;
+    return ivec2(positionScreenPrev * vec2(size));
+}
+
+void risTemporal(inout uint rngState, in const ivec2 pixel, in const ReSTIRPixelInfo pixelInfo, in const ReSTIRSSSReservoir reservoir, out ReSTIRSSSReservoir temporalReservoir, in const uint objectDescriptorId) {
+    // sample neighbor pixel
+    const ivec2 previousPixel = reprojectPixel(ivec2(g_pixels_x, g_pixels_y), pixelInfo.position);// + ivec2(round(vec2(nextFloat(rngState), nextFloat(rngState)) * 2.0 - 1.0));
+    const bool validReprojection = all(greaterThanEqual(previousPixel, ivec2(0))) && all(lessThan(previousPixel, ivec2(g_pixels_x, g_pixels_y)));
+
+    if (!validReprojection) {
+        temporalReservoir = reservoir;
+        return;
+    }
+
+    const int previousPixelIndex = previousPixel.y * g_pixels_x + previousPixel.x;
+
+    //    const GBuffer previousGBuffer = g_gBuffersPreviousFrame[previousPixelIndex];
+    const vec4 previousGBufferRaw = imageLoad(g_gBuffersPreviousFrame, previousPixel);
+    const GBuffer previousGBuffer = GBuffer(uint(previousGBufferRaw[0]), uint(previousGBufferRaw[1]), previousGBufferRaw[2], previousGBufferRaw[3]);
+
+    ReSTIRPixelInfo previousPixelInfo;
+    if (!pixelInfoFromGBuffer(g_ray_origin_prev, previousGBuffer, previousPixelInfo)) {
+        temporalReservoir = reservoir;
+        return;
+    }
+
+    const bool thisSSS = restirsss_pixel_info_isSSS(pixelInfo);
+    const bool previousSSS = restirsss_pixel_info_isSSS(previousPixelInfo);
+    if (!previousSSS && g_restir_non_sss_surfaces == 0
+    || (thisSSS && previousSSS && objectDescriptorId != previousGBuffer.objectDescriptorId)) { // do not reuse SSS samples across different objects
+        temporalReservoir = reservoir;
+        return;
+    }
+
+    //    ReSTIRSSSReservoir previousReservoir = restirsss_reservoir_decompress(g_ReSTIRReservoirsPreviousFrame[previousPixelIndex], previousPixelInfo.position);
+    const vec4 data0 = imageLoad(g_ReSTIRReservoirsPreviousFrame0, previousPixel);
+    const vec4 data1 = imageLoad(g_ReSTIRReservoirsPreviousFrame1, previousPixel);
+    const vec4 data2 = imageLoad(g_ReSTIRReservoirsPreviousFrame2, previousPixel);
+    const vec4 data3 = imageLoad(g_ReSTIRReservoirsPreviousFrame3, previousPixel);
+    ReSTIRSSSReservoir previousReservoir = restirsss_reservoir_decompress(data0, data1, data2, data3, previousPixelInfo.position);
+    restirsss_reservoir_capConfidence(previousReservoir, reservoir.confidenceWeight);
+    //    restirsss_reservoir_capConfidence(previousReservoir, max(1, reservoir.confidenceWeight));
+
+    restirsss_reservoir_initEmpty(temporalReservoir);
+
+    //    float canonicalMIS = 0;// non-defensive pairwise MIS
+
+    //    restirsss_mis_pariwise_stream_neigbor(rngState,
+    //    reservoir, pixelInfo,
+    //    previousReservoir, previousPixelInfo,
+    //    temporalReservoir, g_restir_visibility != 0,
+    //    1, canonicalMIS);
+    //
+    //    restirsss_mis_pariwise_stream_canonical(rngState,
+    //    reservoir, pixelInfo,
+    //    temporalReservoir,
+    //    canonicalMIS);
+    //
+    //    restirsss_mis_pariwise_stream_finalize_non_defensive(pixelInfo,
+    //    temporalReservoir,
+    //    1);
+
+    restirsss_mis_generalized_balance_heuristic_two(rngState, g_restir_shift,
+    reservoir, pixelInfo,
+    previousReservoir, previousPixelInfo,
+    temporalReservoir);
+
+    #ifndef RESTIRSSS_PROBINVERSETEST_L3PATH
+    #ifdef RESTIRSSS_RECONNECTION_INTERSECTIONID_DELAYED
+    const bool pathSSS = restirsss_pixel_info_isSSS(pixelInfo);
+    if (g_restir_shift == RESTIRSSS_SHIFT_SEQUENTIAL_RECONNECTION && pathSSS) {
+        restirsss_reconnection_intersectionId(pixelInfo, temporalReservoir.pickedSample);
+    }
+    #endif
+    #endif
+}
+
+void temporalReuse(inout uint rngState, in const ivec2 pixel) {
+    const int pixelIndex = pixel.y * g_pixels_x + pixel.x;
+
+    // load g-buffer
+    //    const GBuffer gBuffer = g_gBuffers[pixelIndex];
+    const vec4 gBufferRaw = imageLoad(g_gBuffers, pixel);
+    const GBuffer gBuffer = GBuffer(uint(gBufferRaw[0]), uint(gBufferRaw[1]), gBufferRaw[2], gBufferRaw[3]);
+
+    // pixel info
+    ReSTIRPixelInfo pixelInfo;
+    if (!pixelInfoFromGBuffer(vec3(g_ray_origin_x, g_ray_origin_y, g_ray_origin_z), gBuffer, pixelInfo)) {
+        return;
+    }
+
+    const bool pathSSS = restirsss_pixel_info_isSSS(pixelInfo);
+    if (!pathSSS && g_restir_non_sss_surfaces == 0) {
+        return;
+    }
+
+    // load reservoir
+    //    const ReSTIRSSSReservoir reservoir = restirsss_reservoir_decompress(g_ReSTIRReservoirsThisFrame[pixelIndex], pixelInfo.position);
+    vec4 data0 = imageLoad(g_ReSTIRReservoirsThisFrame0, pixel);
+    vec4 data1 = imageLoad(g_ReSTIRReservoirsThisFrame1, pixel);
+    vec4 data2 = imageLoad(g_ReSTIRReservoirsThisFrame2, pixel);
+    vec4 data3 = imageLoad(g_ReSTIRReservoirsThisFrame3, pixel);
+    const ReSTIRSSSReservoir reservoir = restirsss_reservoir_decompress(data0, data1, data2, data3, pixelInfo.position);
+
+    // temporal reuse
+    ReSTIRSSSReservoir reservoirOut;
+    risTemporal(rngState, pixel, pixelInfo, reservoir, reservoirOut, gBuffer.objectDescriptorId);
+
+    // store reservoir
+    //    g_ReSTIRReservoirsThisFrame[pixelIndex] = restirsss_reservoir_compress(reservoirOut);
+    restirsss_reservoir_compress(reservoirOut, data0, data1, data2, data3);
+    imageStore(g_ReSTIRReservoirsThisFrame0, pixel, data0);
+    imageStore(g_ReSTIRReservoirsThisFrame1, pixel, data1);
+    imageStore(g_ReSTIRReservoirsThisFrame2, pixel, data2);
+    imageStore(g_ReSTIRReservoirsThisFrame3, pixel, data3);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(g_pixels_x, g_pixels_y)))) {
+        return;
+    }
+
+    #ifdef RESTIRSSS_WRITE_DEBUG_IMAGES
+    g_debug_valueR[LOCAL_LINEAR_INDEX] = 0;
+    g_debug_valueG[LOCAL_LINEAR_INDEX] = 0;
+    g_debug_valueB[LOCAL_LINEAR_INDEX] = 0;
+    g_debug_valueA[LOCAL_LINEAR_INDEX] = 0;
+    #endif
+
+    // load rng
+    uint rngState = (g_rng_init + 1) * g_pixels_x * (pixel.y + 1) + pixel.x + g_rng_init_offset;// add offset to avoid same seed as other passes (otherwise, visible artifacts possible)
+
+    temporalReuse(rngState, pixel);
+
+    #ifdef RESTIRSSS_WRITE_DEBUG_IMAGES
+    const vec4 debugValue = mix(imageLoad(g_ReSTIRDebug, pixel), vec4(g_debug_valueR[LOCAL_LINEAR_INDEX], g_debug_valueG[LOCAL_LINEAR_INDEX], g_debug_valueB[LOCAL_LINEAR_INDEX], g_debug_valueA[LOCAL_LINEAR_INDEX]), 1.0 / float(g_frame + 1));
+    imageStore(g_ReSTIRDebug, pixel, debugValue);
+    #endif
+}

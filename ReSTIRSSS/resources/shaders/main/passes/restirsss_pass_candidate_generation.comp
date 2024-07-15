@@ -1,0 +1,238 @@
+#version 460
+#extension GL_GOOGLE_include_directive: enable
+#extension GL_EXT_nonuniform_qualifier: enable
+#extension GL_EXT_scalar_block_layout: enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64: require
+#extension GL_EXT_buffer_reference2: require
+#extension GL_EXT_ray_query : require
+
+#include "../../defines.glsl"
+
+#include "../../utility/constants.glsl"
+#include "../../utility/random.glsl"
+#include "../../raystructs.glsl"
+#include "../../raycommon.glsl"
+
+layout (local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+
+layout (push_constant, std430) uniform PushConstants {
+    int g_pixels_x;
+    int g_pixels_y;
+
+    float g_ray_origin_x;
+    float g_ray_origin_y;
+    float g_ray_origin_z;
+    float g_ray_left_bottom_x;
+    float g_ray_left_bottom_y;
+    float g_ray_left_bottom_z;
+    float g_ray_left_top_x;
+    float g_ray_left_top_y;
+    float g_ray_left_top_z;
+    float g_ray_right_bottom_x;
+    float g_ray_right_bottom_y;
+    float g_ray_right_bottom_z;
+    float g_ray_right_top_x;
+    float g_ray_right_top_y;
+    float g_ray_right_top_z;
+
+    uint g_frame;
+
+    uint g_rng_init;
+    uint g_rng_init_offset;
+};
+
+layout (set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+layout (std430, set = 0, binding = 3) uniform options_restirsss_pass_candidate_generation {
+    mat4 g_view_to_clip_space;
+    mat4 g_world_to_view_space;
+
+    uint g_renderer;
+    uint g_render_mode;
+
+    uint g_num_lights;
+
+    uint g_environment_map;
+    vec2 g_environment_map_rotation;
+    vec3 g_sky_color;
+
+    uint g_normal_mapping;
+    uint g_sss;
+
+//    uint g_restir_candidate_samples;
+    uint g_restir_candidate_sss_all_intersections;
+    uint g_restir_candidate_samples_light;
+    uint g_restir_candidate_samples_bsdf;
+//    uint g_restir_visibility;
+    uint g_restir_shift;
+    uint g_restir_non_sss_surfaces;
+
+    mat4 g_vp;// view projection of this frame
+    mat4 g_vp_prev;// view projection of previous frame
+};
+
+// SCENE
+layout (set = 0, binding = 10, scalar) readonly buffer buffer_object_descriptor { ObjectDescriptor g_objectDescriptors[]; };
+layout (set = 0, binding = 11, scalar) readonly buffer buffer_material { Material g_materials[]; };
+layout (set = 0, binding = 12, scalar) readonly buffer buffer_light { Light g_lights[]; };
+
+layout (buffer_reference, scalar) readonly buffer Indices { ivec3 i[]; };
+layout (buffer_reference, scalar) readonly buffer Vertices { Vertex v[]; };
+
+layout (set = 0, binding = 20) uniform sampler2D textures[NUM_TEXTURES];
+layout (set = 0, binding = 21) uniform sampler2D textureEnvironment;
+
+// G-BUFFER
+//layout (set = 0, binding = 30, scalar) readonly buffer buffer_g_buffers { GBuffer g_gBuffers[]; };
+layout (set = 0, binding = 30, rgba32f) readonly uniform image2D g_gBuffers;
+
+#include "../../trace/trace_rayquery.glsl"
+#include "../../arealight.glsl"
+
+// ReSTIR
+#include "../restirsss/restirsss_defines.glsl"
+#include "../restirsss/restirsss_pixel_info.glsl"
+#include "../restirsss/restirsss_reservoir.glsl"
+#ifdef RESTIRSSS_PROBINVERSETEST_L3PATH
+#include "../restirsss/probinversetest/restirsss_target_function_test.glsl"
+#else
+#include "../restirsss/restirsss_target_function.glsl"
+#include "../restirsss/restirsss_disney_bssrdf.glsl"
+#endif
+//layout (set = 0, binding = 41, scalar) writeonly buffer buffer_ReSTIR_reservoirs_out { ReSTIRSSSReservoirCompressed g_ReSTIRReservoirsOut[]; };
+layout (set = 0, binding = 45, rgba32f) writeonly uniform image2D g_ReSTIRReservoirsOut0;
+layout (set = 0, binding = 46, rgba32f) writeonly uniform image2D g_ReSTIRReservoirsOut1;
+layout (set = 0, binding = 47, rgba32f) writeonly uniform image2D g_ReSTIRReservoirsOut2;
+layout (set = 0, binding = 48, rgba32f) writeonly uniform image2D g_ReSTIRReservoirsOut3;
+
+#include "../gbuffer.glsl"
+
+#include "../restirsss/restirsss_disney_bsdf.glsl"
+
+void gris(inout uint rngState, in const ivec2 pixel, in const int objectDescriptorId, in const ReSTIRPixelInfo pixelInfo, out ReSTIRSSSReservoir reservoir) {
+    restirsss_reservoir_initEmpty(reservoir);
+
+    // === DIRECT ILLUMINATION ===
+    if (g_num_lights > 0) {
+        // === initial candidates ===
+        #ifdef RESTIRSSS_PROBINVERSETEST_L3PATH
+        ReSTIRSSSSample nextSample;
+        float weight;
+        for (int i = 0; i < g_restir_candidate_samples_light; i++) {
+            generateCandidateL3Path(rngState, pixelInfo, objectDescriptorId, nextSample, weight);
+            restirsss_reservoir_update(rngState, reservoir, nextSample, weight, 1.0);// confidence = 1.0
+        }
+        restirsss_reservoir_calculateUnbiasedContributionWeight(reservoir, restirsss_target_function_evaluate(pixelInfo, reservoir.pickedSample));
+        #else
+        float pdfScatteringType;
+        const uint scatteringType = disney_sampleScatteringType(rngState, g_sss != 0, 0, pixelInfo.material.subsurface, pdfScatteringType);
+
+        if ((scatteringType & SCATTERING_TYPE_BSSRDF) > 0) {
+            // bssrdf
+            if (g_restir_candidate_sss_all_intersections == 0) {
+                for (int i = 0; i < g_restir_candidate_samples_light; i++) {
+                    generateSingleCandidateBSSRDFWithLightSourceSampling(rngState, pixelInfo, objectDescriptorId, reservoir);
+                }
+                for (int i = 0; i < g_restir_candidate_samples_bsdf; i++) {
+                    generateSingleCandidateBSSRDFWithBSDFSampling(rngState, pixelInfo, objectDescriptorId, reservoir);
+                }
+                restirsss_reservoir_calculateUnbiasedContributionWeight(reservoir, restirsss_target_function_evaluate(pixelInfo, reservoir.pickedSample));
+            } else {
+                for (int i = 0; i < g_restir_candidate_samples_light; i++) {
+                    generateAllCandidatesBSSRDFWithLightSourceSampling(rngState, pixelInfo, objectDescriptorId, reservoir);
+                }
+                for (int i = 0; i < g_restir_candidate_samples_bsdf; i++) {
+                    generateAllCandidatesBSSRDFWithBSDFSampling(rngState, pixelInfo, objectDescriptorId, reservoir);
+                }
+                restirsss_reservoir_calculateUnbiasedContributionWeight(reservoir, restirsss_target_function_evaluate(pixelInfo, reservoir.pickedSample));
+            }
+        } else {
+            for (int i = 0; i < g_restir_candidate_samples_light; i++) {
+                generateSingleCandidateBSDFWithLightSourceSampling(rngState, pixelInfo, objectDescriptorId, reservoir);
+            }
+            for (int i = 0; i < g_restir_candidate_samples_bsdf; i++) {
+                generateSingleCandidateBSDFWithBSDFSampling(rngState, pixelInfo, objectDescriptorId, reservoir);
+            }
+            restirsss_reservoir_calculateUnbiasedContributionWeight(reservoir, restirsss_target_function_evaluate(pixelInfo, reservoir.pickedSample));
+        }
+        #endif
+
+        // VISIBILITY PASS
+        if (!restirsss_reservoir_isNullSample(reservoir)) {
+            vec3 surfacePosition;
+            vec3 surfaceGeometricNormal;
+            vec3 surfaceToLightNormalized;
+            float tMax = 0;
+            #ifdef RESTIRSSS_PROBINVERSETEST_L3PATH
+            surfacePosition = reservoir.pickedSample.samplePosition;
+            surfaceGeometricNormal = reservoir.pickedSample.sampleGeometricNormal;
+            const vec3 d = reservoir.pickedSample.lightPosition - reservoir.pickedSample.samplePosition;
+            surfaceToLightNormalized = normalize(d);
+            tMax = length(d);
+            #else
+            if (restirsss_pixel_info_isSSS(pixelInfo)) {
+                surfacePosition = reservoir.pickedSample.samplePosition;
+                surfaceGeometricNormal = reservoir.pickedSample.sampleGeometricNormal;
+                const vec3 d = reservoir.pickedSample.lightPosition - reservoir.pickedSample.samplePosition;
+                surfaceToLightNormalized = normalize(d);
+                tMax = length(d);
+            } else {
+                surfacePosition = pixelInfo.position;
+                surfaceGeometricNormal = pixelInfo.geometricNormal;
+                const vec3 d = reservoir.pickedSample.lightPosition - pixelInfo.position;
+                surfaceToLightNormalized = normalize(d);
+                tMax = length(d);
+            }
+            #endif
+
+            if (!visibility_shadowRay(surfacePosition, surfaceGeometricNormal, surfaceToLightNormalized, tMax, reservoir.pickedSample.lightObjectDescriptor, reservoir.pickedSample.lightTriangleId)) {
+                reservoir.unbiasedContributionWeight = 0;
+            }
+        }
+    }
+}
+
+void candidateGeneration(inout uint rngState, in const ivec2 pixel) {
+    const int pixelIndex = pixel.y * g_pixels_x + pixel.x;
+
+    // load g-buffer
+    //    const GBuffer gBuffer = g_gBuffers[pixelIndex];
+    const vec4 gBufferRaw = imageLoad(g_gBuffers, pixel);
+    const GBuffer gBuffer = GBuffer(uint(gBufferRaw[0]), uint(gBufferRaw[1]), gBufferRaw[2], gBufferRaw[3]);
+
+    // pixel info
+    ReSTIRPixelInfo pixelInfo;
+    if (!pixelInfoFromGBuffer(vec3(g_ray_origin_x, g_ray_origin_y, g_ray_origin_z), gBuffer, pixelInfo)) {
+        return;
+    }
+
+    const bool pathSSS = restirsss_pixel_info_isSSS(pixelInfo);
+    if (!pathSSS && g_restir_non_sss_surfaces == 0) {
+        return;
+    }
+
+    // create reservoir
+    ReSTIRSSSReservoir reservoirOut;
+    gris(rngState, pixel, int(gBuffer.objectDescriptorId), pixelInfo, reservoirOut);
+
+    // store reservoir
+    //    g_ReSTIRReservoirsOut[pixelIndex] = restirsss_reservoir_compress(reservoirOut);
+    vec4 data0, data1, data2, data3;
+    restirsss_reservoir_compress(reservoirOut, data0, data1, data2, data3);
+    imageStore(g_ReSTIRReservoirsOut0, pixel, data0);
+    imageStore(g_ReSTIRReservoirsOut1, pixel, data1);
+    imageStore(g_ReSTIRReservoirsOut2, pixel, data2);
+    imageStore(g_ReSTIRReservoirsOut3, pixel, data3);
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(g_pixels_x, g_pixels_y)))) {
+        return;
+    }
+
+    // load rng
+    uint rngState = (g_rng_init + 1) * g_pixels_x * (pixel.y + 1) + pixel.x + g_rng_init_offset;// add offset to avoid same seed as other passes (otherwise, visible artifacts possible)
+
+    candidateGeneration(rngState, pixel);
+}

@@ -1,0 +1,37 @@
+#version 460
+#extension GL_GOOGLE_include_directive: enable
+
+layout (local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+
+layout (push_constant, std430) uniform PushConstants {
+    int g_pixels_x;
+    int g_pixels_y;
+
+    uint g_tonemapper;
+};
+
+layout (set = 0, binding = 0, rgba32f) uniform image2D image;
+
+#define TONEMAPPER_OFF 0
+#define TONEMAPPER_GAMMA 1
+
+void main() {
+    if (g_tonemapper == TONEMAPPER_OFF) {
+        return;
+    }
+
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(g_pixels_x, g_pixels_y)))) {
+        return;
+    }
+
+    const vec3 colorIn = imageLoad(image, pixel).rgb;
+
+    vec3 colorOut = colorIn;
+    if (g_tonemapper == TONEMAPPER_GAMMA) {
+//        colorOut = pow(colorIn, vec3(1.0 / 2.2));
+        colorOut = /*colorIn == vec3(1) ? vec3(1) :*/ pow(colorIn / (colorIn + vec3(1.0)), vec3(1.0 / 2.2)); // we use reinhard tonemapping here
+    }
+
+    imageStore(image, pixel, vec4(colorOut, 1.0));
+}

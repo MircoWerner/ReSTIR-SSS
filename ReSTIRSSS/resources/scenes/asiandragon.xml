@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<scene>
+    <scene name="asiandragon" mode="3"/>
+    <camera position="8.409 6.008 -7.942" orientation="0 2.577 2.122" speed="10">
+        <spline u="9999" speed="1">
+            <point position="15.1209 6.008 3.6638" orientation="0 1.20975 2.15569"/>
+            <point position="15.1209 6.008 3.6638" orientation="0 1.20975 2.15569"/>
+            <point position="16.2165 6.008 -0.964753" orientation="0 1.64846 2.09287"/>
+            <point position="6.26706 4.5061 -8.82182" orientation="0 2.88467 1.96191"/>
+            <point position="-4.83692 4.5061 -11.9024" orientation="0 3.41063 1.98242"/>
+            <point position="-4.83692 4.5061 -11.9024" orientation="0 3.41063 1.98242"/>
+        </spline>
+    </camera>
+    <window width="1920" height="1080"/>
+    <rendering maxFrames="1024" renderer="0" debug="0" tonemapper="1" normalMapping="false" sss="true" nonSSSObjects="true" spp="1" denoiser="false"/>
+    <restirsss nonSSSSurfaces="false"
+               candidateSamplesLight="1" candidateSamplesBSDF="0" candidateSSSAllIntersections="true"
+               shift="2"
+               temporal="false" temporalShiftSequential="0"
+               spatial="false" spatialCount="4" spatialShiftSequential="0"
+               spatial2="false" spatial2Count="2" spatial2ShiftSequential="1"/>
+</scene>

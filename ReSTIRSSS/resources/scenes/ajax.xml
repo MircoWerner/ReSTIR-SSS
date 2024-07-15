@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<scene>
+    <scene name="ajax"/>
+    <camera position="35.798 8.049 -14.853" orientation="0 1.978 1.818" speed="10">
+        <spline u="9999" speed="1">
+            <point position="0 8.049 55" orientation="0 0 1.818"/>
+            <point position="55 8.049 0" orientation="0 1.571 1.818"/>
+            <point position="0 8.049 -55" orientation="0 3.142 1.818"/>
+            <point position="-55 8.049 0" orientation="0 4.712 1.818"/>
+            <point position="0 8.049 55" orientation="0 6.283 1.818"/>
+            <point position="55 8.049 0" orientation="0 7.854 1.818"/>
+            <point position="0 8.049 -55" orientation="0 9.425 1.818"/>
+        </spline>
+    </camera>
+    <window width="1080" height="1920"/>
+    <rendering maxFrames="1024" renderer="0" debug="0" tonemapper="1" normalMapping="false" sss="true" nonSSSObjects="true" spp="1" denoiser="false"/>
+    <restirsss nonSSSSurfaces="false"
+               candidateSamplesLight="1" candidateSamplesBSDF="0" candidateSSSAllIntersections="true"
+               shift="2"
+               temporal="false" temporalShiftSequential="0"
+               spatial="false" spatialCount="4" spatialShiftSequential="0"
+               spatial2="false" spatial2Count="2" spatial2ShiftSequential="1"/>
+</scene>

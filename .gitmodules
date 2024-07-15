@@ -1,0 +1,27 @@
+[submodule "VkRaven/lib/stb"]
+	path = VkRaven/lib/stb
+	url = git@github.com:nothings/stb.git
+[submodule "VkRaven/lib/tinyobjloader"]
+	path = VkRaven/lib/tinyobjloader
+	url = git@github.com:tinyobjloader/tinyobjloader.git
+[submodule "VkRaven/lib/SPIRV-Reflect"]
+	path = VkRaven/lib/SPIRV-Reflect
+	url = git@github.com:KhronosGroup/SPIRV-Reflect.git
+[submodule "VkRaven/lib/tinygltf"]
+	path = VkRaven/lib/tinygltf
+	url = git@github.com:syoyo/tinygltf.git
+[submodule "VkRaven/lib/glfw"]
+	path = VkRaven/lib/glfw
+	url = git@github.com:glfw/glfw.git
+[submodule "VkRaven/lib/glm"]
+	path = VkRaven/lib/glm
+	url = git@github.com:g-truc/glm.git
+[submodule "VkRaven/lib/imgui"]
+	path = VkRaven/lib/imgui
+	url = git@github.com:ocornut/imgui.git
+[submodule "VkRaven/lib/pugixml"]
+	path = VkRaven/lib/pugixml
+	url = git@github.com:zeux/pugixml.git
+[submodule "VkRaven/lib/argparse"]
+	path = VkRaven/lib/argparse
+	url = git@github.com:p-ranav/argparse.git

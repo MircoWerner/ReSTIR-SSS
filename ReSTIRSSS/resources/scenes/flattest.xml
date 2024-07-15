@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<scene>
+    <scene name="flattest"/>
+    <camera position="0 -4.5 0" orientation="0 0 0" speed="10"/>
+    <window width="1080" height="1080"/>
+    <rendering maxFrames="1024" renderer="0" debug="0" tonemapper="1" normalMapping="false" sss="true" nonSSSObjects="true" spp="1" denoiser="false"/>
+    <restirsss nonSSSSurfaces="false"
+               candidateSamplesLight="1" candidateSamplesBSDF="0" candidateSSSAllIntersections="true"
+               shift="2"
+               temporal="false" temporalShiftSequential="0"
+               spatial="false" spatialCount="4" spatialShiftSequential="0"
+               spatial2="false" spatial2Count="2" spatial2ShiftSequential="1"/>
+</scene>

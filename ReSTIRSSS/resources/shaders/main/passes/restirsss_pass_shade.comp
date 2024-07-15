@@ -1,0 +1,286 @@
+#version 460
+#extension GL_GOOGLE_include_directive: enable
+#extension GL_EXT_nonuniform_qualifier: enable
+#extension GL_EXT_scalar_block_layout: enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64: require
+#extension GL_EXT_buffer_reference2: require
+#extension GL_EXT_ray_query : require
+
+#include "../../defines.glsl"
+
+#include "../../utility/constants.glsl"
+#include "../../utility/random.glsl"
+#include "../../raystructs.glsl"
+#include "../../raycommon.glsl"
+
+//#define VISUALIZE_SHIFT_HYBRID_CRITERION
+#ifdef VISUALIZE_SHIFT_HYBRID_CRITERION
+#include "../../utility/colormap.glsl"
+#include "../restirsss/restirsss_shift_hybrid_criterion.glsl"
+#endif
+
+layout (local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+
+layout (push_constant, std430) uniform PushConstants {
+    int g_pixels_x;
+    int g_pixels_y;
+
+    float g_ray_origin_x;
+    float g_ray_origin_y;
+    float g_ray_origin_z;
+    float g_ray_left_bottom_x;
+    float g_ray_left_bottom_y;
+    float g_ray_left_bottom_z;
+    float g_ray_left_top_x;
+    float g_ray_left_top_y;
+    float g_ray_left_top_z;
+    float g_ray_right_bottom_x;
+    float g_ray_right_bottom_y;
+    float g_ray_right_bottom_z;
+    float g_ray_right_top_x;
+    float g_ray_right_top_y;
+    float g_ray_right_top_z;
+
+    uint g_frame;
+
+    uint g_rng_init;
+    uint g_rng_init_offset;
+};
+
+layout (set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
+layout (set = 0, binding = 1, rgba32f) uniform image2D framebuffer;
+layout (set = 0, binding = 2, rgba32f) uniform image2D accumulationBuffer;
+
+layout (std430, set = 0, binding = 3) uniform options_restirsss_pass_shade {
+    mat4 g_view_to_clip_space;
+    mat4 g_world_to_view_space;
+
+    uint g_num_lights;
+
+    uint g_environment_map;
+    vec2 g_environment_map_rotation;
+    vec3 g_sky_color;
+
+    uint g_normal_mapping;
+    uint g_sss;
+
+//    uint g_restir_visibility;
+    uint g_restir_shift;
+    uint g_restir_non_sss_surfaces;
+    uint g_restir_debug;
+
+    mat4 g_vp;// view projection of this frame
+    mat4 g_vp_prev;// view projection of previous frame
+};
+
+// SCENE
+layout (set = 0, binding = 10, scalar) readonly buffer buffer_object_descriptor { ObjectDescriptor g_objectDescriptors[]; };
+layout (set = 0, binding = 11, scalar) readonly buffer buffer_material { Material g_materials[]; };
+layout (set = 0, binding = 12, scalar) readonly buffer buffer_light { Light g_lights[]; };
+
+layout (buffer_reference, scalar) readonly buffer Indices { ivec3 i[]; };
+layout (buffer_reference, scalar) readonly buffer Vertices { Vertex v[]; };
+
+layout (set = 0, binding = 20) uniform sampler2D textures[NUM_TEXTURES];
+layout (set = 0, binding = 21) uniform sampler2D textureEnvironment;
+
+// G-BUFFER
+//layout (set = 0, binding = 30, scalar) readonly buffer buffer_g_buffers { GBuffer g_gBuffers[]; };
+layout (set = 0, binding = 30, rgba32f) readonly uniform image2D g_gBuffers;
+
+// ReSTIR
+#include "../restirsss/restirsss_defines.glsl"
+#include "../restirsss/restirsss_pixel_info.glsl"
+#include "../restirsss/restirsss_reservoir.glsl"
+#ifdef RESTIRSSS_PROBINVERSETEST_L3PATH
+#include "../restirsss/probinversetest/restirsss_target_function_test.glsl"
+#else
+#include "../restirsss/restirsss_target_function.glsl"
+#endif
+//layout (set = 0, binding = 40, scalar) readonly buffer buffer_ReSTIR_reservoirs_in { ReSTIRSSSReservoirCompressed g_ReSTIRReservoirsIn[]; };
+layout (set = 0, binding = 40, rgba32f) readonly uniform image2D g_ReSTIRReservoirsIn0;
+layout (set = 0, binding = 41, rgba32f) readonly uniform image2D g_ReSTIRReservoirsIn1;
+layout (set = 0, binding = 42, rgba32f) readonly uniform image2D g_ReSTIRReservoirsIn2;
+layout (set = 0, binding = 43, rgba32f) readonly uniform image2D g_ReSTIRReservoirsIn3;
+
+#include "../gbuffer.glsl"
+#include "../../environment.glsl"
+
+#ifdef RESTIRSSS_WRITE_DEBUG_IMAGES
+layout (set = 0, binding = 50, rgba32f) readonly uniform image2D g_ReSTIRDebugTemporal;
+layout (set = 0, binding = 51, rgba32f) readonly uniform image2D g_ReSTIRDebugSpatial;
+layout (set = 0, binding = 52, rgba32f) readonly uniform image2D g_ReSTIRDebugSpatial2;
+#include "../../utility/colormap.glsl"
+#endif
+
+void shade(in const ivec2 pixel) {
+    const int pixelIndex = pixel.y * g_pixels_x + pixel.x;
+
+    // load g-buffer
+    //    const GBuffer gBuffer = g_gBuffers[pixelIndex];
+    const vec4 gBufferRaw = imageLoad(g_gBuffers, pixel);
+    const GBuffer gBuffer = GBuffer(uint(gBufferRaw[0]), uint(gBufferRaw[1]), gBufferRaw[2], gBufferRaw[3]);
+
+    // pixel info
+    ReSTIRPixelInfo pixelInfo;
+    if (!pixelInfoFromGBuffer(vec3(g_ray_origin_x, g_ray_origin_y, g_ray_origin_z), gBuffer, pixelInfo)) {
+        return;
+    }
+
+    const bool pathSSS = restirsss_pixel_info_isSSS(pixelInfo);
+    if (!pathSSS && g_restir_non_sss_surfaces == 0) {
+        return;
+    }
+
+    // load reservoir
+    //    const ReSTIRSSSReservoir reservoir = restirsss_reservoir_decompress(g_ReSTIRReservoirsIn[pixelIndex], pixelInfo.position);
+    const vec4 data0 = imageLoad(g_ReSTIRReservoirsIn0, pixel);
+    const vec4 data1 = imageLoad(g_ReSTIRReservoirsIn1, pixel);
+    const vec4 data2 = imageLoad(g_ReSTIRReservoirsIn2, pixel);
+    const vec4 data3 = imageLoad(g_ReSTIRReservoirsIn3, pixel);
+    const ReSTIRSSSReservoir reservoir = restirsss_reservoir_decompress(data0, data1, data2, data3, pixelInfo.position);
+
+    vec3 color = vec3(0, 1, 0);
+    if (!(isnan(reservoir.unbiasedContributionWeight) || isinf(reservoir.unbiasedContributionWeight)
+    || isnan(reservoir.sumWeights) || isinf(reservoir.sumWeights)
+    || isnan(reservoir.confidenceWeight) || isinf(reservoir.confidenceWeight))) {
+        color = restirsss_measurementContributionFunction(pixelInfo, reservoir.pickedSample) * reservoir.unbiasedContributionWeight;
+    }
+
+    // accumulate and write framebuffer
+    const vec3 newColor = mix(imageLoad(accumulationBuffer, pixel).rgb, color, 1.0 / float(g_frame + 1));
+    imageStore(accumulationBuffer, pixel, vec4(newColor, 1.0));
+    imageStore(framebuffer, pixel, vec4(newColor, 1.0));
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(g_pixels_x, g_pixels_y)))) {
+        return;
+    }
+
+    #ifdef VISUALIZE_SHIFT_HYBRID_CRITERION
+    {
+        uint shift = INVALID_UINT_VALUE;
+
+        const int pixelIndex = pixel.y * g_pixels_x + pixel.x;
+
+        // load g-buffer
+        const vec4 gBufferRaw = imageLoad(g_gBuffers, pixel);
+        const GBuffer gBuffer = GBuffer(uint(gBufferRaw[0]), uint(gBufferRaw[1]), gBufferRaw[2], gBufferRaw[3]);
+
+        // pixel info
+        ReSTIRPixelInfo pixelInfo;
+        if (!pixelInfoFromGBuffer(vec3(g_ray_origin_x, g_ray_origin_y, g_ray_origin_z), gBuffer, pixelInfo)) {
+            imageStore(framebuffer, pixel, vec4(vec3(1), 1.0));
+            return;
+        }
+
+        const bool pathSSS = restirsss_pixel_info_isSSS(pixelInfo);
+        if (!pathSSS) {
+            imageStore(framebuffer, pixel, vec4(vec3(1), 1.0));
+            return;
+        }
+
+        // load reservoir
+        //                ReSTIRSSSReservoir reservoir = restirsss_reservoir_decompress(g_ReSTIRReservoirsIn[pixelIndex], pixelInfo.position);
+        const vec4 data0 = imageLoad(g_ReSTIRReservoirsIn0, pixel);
+        const vec4 data1 = imageLoad(g_ReSTIRReservoirsIn1, pixel);
+        const vec4 data2 = imageLoad(g_ReSTIRReservoirsIn2, pixel);
+        const vec4 data3 = imageLoad(g_ReSTIRReservoirsIn3, pixel);
+        const ReSTIRSSSReservoir reservoir = restirsss_reservoir_decompress(data0, data1, data2, data3, pixelInfo.position);
+
+        if (!restirsss_reservoir_isNullSample(reservoir)) {
+            const bool connectable = restirsss_shift_connectable(pixelInfo.position, pixelInfo.geometricNormal, reservoir.pickedSample.samplePosition, reservoir.pickedSample.sampleGeometricNormal, pixelInfo.material.scatterDistance);
+            shift = connectable ? 1 : 2;
+        } else {
+            shift = 0;
+        }
+
+        // accumulate and write framebuffer
+        vec3 newColor;
+        if (shift != INVALID_UINT_VALUE) {
+            if (shift == 0) {
+                // invalid reservoir sample
+                newColor = colormap_plasma(0.5);
+            } else if (shift == 1) {
+                // reconnection
+                newColor = colormap_plasma(0);
+            } else {
+                // delayed reconnection
+                newColor = colormap_plasma(1);
+            }
+            const vec4 outColor = mix(imageLoad(accumulationBuffer, pixel), vec4(newColor, 1.0), 1.0 / float(g_frame + 1));
+            imageStore(accumulationBuffer, pixel, outColor);
+            imageStore(framebuffer, pixel, vec4(colormap_inverse_tonemapper_gamma(outColor.rgb), 1.0));
+            return;
+        }
+
+        return;
+    }
+    #endif
+
+    #ifdef RESTIRSSS_WRITE_DEBUG_IMAGES
+    if (g_restir_debug > 0) {
+        const vec4 gBufferRaw = imageLoad(g_gBuffers, pixel);
+        const GBuffer gBuffer = GBuffer(uint(gBufferRaw[0]), uint(gBufferRaw[1]), gBufferRaw[2], gBufferRaw[3]);
+
+        // pixel info
+        ReSTIRPixelInfo pixelInfo;
+        if (!pixelInfoFromGBuffer(vec3(g_ray_origin_x, g_ray_origin_y, g_ray_origin_z), gBuffer, pixelInfo)) {
+            imageStore(framebuffer, pixel, vec4(vec3(1), 1.0));
+            return;
+        }
+
+        const bool pathSSS = restirsss_pixel_info_isSSS(pixelInfo);
+        if (!pathSSS) {
+            imageStore(framebuffer, pixel, vec4(vec3(1), 1.0));
+            return;
+        }
+
+        //        vec4 debug = vec4(0);
+        //        if (g_restir_debug == 1) {
+        //            debug = imageLoad(g_ReSTIRDebugTemporal, pixel);
+        //        } else if (g_restir_debug == 2) {
+        //            debug = imageLoad(g_ReSTIRDebugSpatial, pixel);
+        //        } else if (g_restir_debug == 3) {
+        //            debug = imageLoad(g_ReSTIRDebugSpatial2, pixel);
+        //        }
+        ////        const float debugValue = debug.r + debug.g > 0 ? debug.r / float(debug.r + debug.g) : 0;
+        //        const float debugValue = debug.b + debug.a > 0 ? debug.b / float(debug.b + debug.a) : 0;
+        //        const vec3 debugColor = colormap_inverse_tonemapper_gamma(colormap_viridis(clamp(debugValue, 0, 1)));
+        //        imageStore(framebuffer, pixel, vec4(debugColor, 1.0));
+
+        vec4 debug1 = imageLoad(g_ReSTIRDebugSpatial, pixel);
+        vec4 debug2 = imageLoad(g_ReSTIRDebugSpatial2, pixel);
+        const float debugValue1 = debug1.b + debug1.a > 0 ? debug1.b / float(debug1.b + debug1.a) : 0;
+        const float debugValue2 = debug2.b + debug2.a > 0 ? debug2.b / float(debug2.b + debug2.a) : 0;
+        const float debugValue = max(debugValue1, debugValue2);
+        const vec3 debugColor = colormap_inverse_tonemapper_gamma(colormap_viridis(clamp(debugValue, 0, 1)));
+        imageStore(framebuffer, pixel, vec4(debugColor, 1.0));
+
+//        vec4 debug1 = imageLoad(g_ReSTIRDebugSpatial, pixel);
+//        //        vec4 debug2 = imageLoad(g_ReSTIRDebugSpatial2, pixel);
+//        const float debugValue1 = debug1.r + debug1.g > 0 ? debug1.r / float(debug1.r + debug1.g) : 0;// fraction of shifted samples that are better for first reuse pass
+//        const float debugValue2 = debug1.b + debug1.a > 0 ? debug1.b / float(debug1.b + debug1.a) : 0;// fraction of shifted samples that are better for second reuse pass
+//        const float debugValue = (debugValue2 - debugValue1 + 1.0) / 2.0;
+//        vec3 newColor;// = vec3(colormap_plasma(debugValue));
+//        if (debugValue1 > debugValue2) { // first pass is more successfull
+//            // reconnection
+//            newColor = colormap_plasma(0);
+//        } else if (debugValue2 > debugValue1) { // second pass is more successfull
+//            // delayed reconnection
+//            newColor = colormap_plasma(1);
+//        } else {
+//            newColor = (colormap_plasma(0) + colormap_plasma(1)) / 2.0;
+//        }
+//        const vec4 outColor = mix(imageLoad(accumulationBuffer, pixel), vec4(newColor, 1.0), 1.0 / float(g_frame + 1));
+//        imageStore(accumulationBuffer, pixel, outColor);
+//        imageStore(framebuffer, pixel, vec4(colormap_inverse_tonemapper_gamma(outColor.rgb), 1.0));
+
+        return;
+    }
+    #endif
+
+    shade(pixel);
+}
