@@ -50,7 +50,7 @@ namespace raven {
         vkDestroyCommandPool(m_device, m_transferCommandPool, nullptr);
         vkDestroyDevice(m_device, nullptr);
         if (enableValidationLayers) {
-            DestroyDebugUtilsMessengerEXT(m_instance, m_debugMessenger, nullptr);
+            destroyDebugUtilsMessengerEXT(m_instance, m_debugMessenger, nullptr);
         }
         vkDestroyInstance(m_instance, nullptr);
     }
@@ -84,7 +84,7 @@ namespace raven {
             instanceCreateInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
             instanceCreateInfo.ppEnabledLayerNames = validationLayers.data();
             populateDebugMessengerCreateInfo(debugCreateInfo);
-            instanceCreateInfo.pNext = (vk::DebugUtilsMessengerCreateInfoEXT *) &debugCreateInfo;
+            instanceCreateInfo.pNext = &debugCreateInfo;
         } else {
             instanceCreateInfo.enabledLayerCount = 0;
             instanceCreateInfo.pNext = nullptr;
@@ -102,7 +102,7 @@ namespace raven {
         uint32_t layerCount;
         vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
         std::vector<vk::LayerProperties> availableLayers(layerCount);
-        if (vk::enumerateInstanceLayerProperties(&layerCount, availableLayers.data()) != vk::Result::eSuccess) {
+        if (enumerateInstanceLayerProperties(&layerCount, availableLayers.data()) != vk::Result::eSuccess) {
             throw std::runtime_error("Failed to enumerate instance layer properties!");
         }
 
@@ -130,15 +130,13 @@ namespace raven {
         }
     }
 
-    void GPUContext::populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT &createInfo) {
-        createInfo = {};
-        createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-        createInfo.messageSeverity =
-                VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-        createInfo.messageType =
-                VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    void GPUContext::populateDebugMessengerCreateInfo(vk::DebugUtilsMessengerCreateInfoEXT &createInfo) {
+        createInfo.messageSeverity = vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose |
+                                     vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning |
+                                     vk::DebugUtilsMessageSeverityFlagBitsEXT::eError;
+        createInfo.messageType = vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral |
+                                 vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation |
+                                 vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance;
         createInfo.pfnUserCallback = debugCallback;
     }
 
@@ -155,29 +153,20 @@ namespace raven {
             return;
         }
 
-        VkDebugUtilsMessengerCreateInfoEXT createInfo{};
+        vk::DebugUtilsMessengerCreateInfoEXT createInfo{};
         populateDebugMessengerCreateInfo(createInfo);
 
-        if (CreateDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr, &m_debugMessenger) != VK_SUCCESS) {
+        if (createDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr, &m_debugMessenger) != vk::Result::eSuccess) {
             throw std::runtime_error("Failed to set up debug messenger!");
         }
     }
 
-    VkResult GPUContext::CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkDebugUtilsMessengerEXT *pDebugMessenger) {
-        auto func = (PFN_vkCreateDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
-        if (func != nullptr) {
-            return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
-        } else {
-            return VK_ERROR_EXTENSION_NOT_PRESENT;
-        }
+    vk::Result GPUContext::createDebugUtilsMessengerEXT(const vk::Instance instance, const vk::DebugUtilsMessengerCreateInfoEXT *pCreateInfo, const vk::AllocationCallbacks *pAllocator, vk::DebugUtilsMessengerEXT *pDebugMessenger) {
+        return instance.createDebugUtilsMessengerEXT(pCreateInfo, pAllocator, pDebugMessenger);
     }
 
-    void GPUContext::DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks *pAllocator) {
-        auto func = (PFN_vkDestroyDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance,
-                                                                                "vkDestroyDebugUtilsMessengerEXT");
-        if (func != nullptr) {
-            func(instance, debugMessenger, pAllocator);
-        }
+    void GPUContext::destroyDebugUtilsMessengerEXT(const vk::Instance instance, const vk::DebugUtilsMessengerEXT debugMessenger, const vk::AllocationCallbacks *pAllocator) {
+        return instance.destroyDebugUtilsMessengerEXT(debugMessenger, pAllocator);
     }
 
     void GPUContext::pickPhysicalDevice() {

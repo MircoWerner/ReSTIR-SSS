@@ -112,7 +112,7 @@ namespace raven {
 
     protected:
         vk::Instance m_instance{};
-        VkDebugUtilsMessengerEXT m_debugMessenger{};
+        vk::DebugUtilsMessengerEXT m_debugMessenger{};
 
         std::vector<vk::CommandBuffer> m_graphicsCommandBuffers;
         std::vector<vk::CommandBuffer> m_computeCommandBuffers;
@@ -141,11 +141,11 @@ namespace raven {
 
         void createInstance();
         bool checkValidationLayerSupport();
-        static void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT &createInfo);
+        static void populateDebugMessengerCreateInfo(vk::DebugUtilsMessengerCreateInfoEXT &createInfo);
         static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData, void *pUserData);
         void setupDebugMessenger();
-        static VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkDebugUtilsMessengerEXT *pDebugMessenger);
-        static void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks *pAllocator);
+        static vk::Result createDebugUtilsMessengerEXT(vk::Instance instance, const vk::DebugUtilsMessengerCreateInfoEXT *pCreateInfo, const vk::AllocationCallbacks *pAllocator, vk::DebugUtilsMessengerEXT *pDebugMessenger);
+        static void destroyDebugUtilsMessengerEXT(vk::Instance instance, vk::DebugUtilsMessengerEXT debugMessenger, const vk::AllocationCallbacks *pAllocator);
         void pickPhysicalDevice();
         void queryPhysicalDeviceProperties();
 
