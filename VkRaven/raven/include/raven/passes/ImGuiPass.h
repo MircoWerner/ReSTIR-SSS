@@ -43,7 +43,8 @@ namespace raven {
             renderPassInfo.renderArea.extent = m_swapChain->getSwapchainExtent();
 
             std::array<vk::ClearValue, 2> clearValues{};
-            clearValues[0].color = {vk::ClearColorValue(0.0f, 0.0f, 0.0f, 1.0f)};
+            constexpr std::array black = { 0.0f, 0.0f, 0.0f, 1.0f };
+            clearValues[0].color = {vk::ClearColorValue(black)};
             clearValues[1].depthStencil = vk::ClearDepthStencilValue{1.0f, 0}; // depth in [0,1] where 1 is at the far view plane
             renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
             renderPassInfo.pClearValues = clearValues.data();

@@ -7,6 +7,8 @@
 #include "RavenTexture.h"
 #include "raven/core/GPUContext.h"
 
+#include <map>
+
 namespace raven {
     class RavenScene {
     public:
