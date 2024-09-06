@@ -125,7 +125,7 @@ namespace raven {
             m_activeIndex = (m_activeIndex + 1) % MAX_FRAMES_IN_FLIGHT;
         }
 
-        std::chrono::time_point<std::chrono::system_clock> m_time = std::chrono::high_resolution_clock::now();
+        std::chrono::time_point<std::chrono::steady_clock> m_time = std::chrono::high_resolution_clock::now();
 
     private:
 #ifdef NDEBUG
